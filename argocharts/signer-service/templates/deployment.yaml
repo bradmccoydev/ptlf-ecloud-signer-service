@@ -1,0 +1,160 @@
+{{- $fullName := include "chart.fullname" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullName }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "chart.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "chart.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "chart.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "chart.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- if .Values.image.pullSecrets }}
+      imagePullSecrets:
+        - name: {{ .Values.image.pullSecrets }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: {{ .Values.podSecurityContext.runAsNonRoot }}
+        runAsUser: {{ .Values.podSecurityContext.runAsUser }}
+        fsGroup: {{ .Values.podSecurityContext.fsGroup }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
+            runAsNonRoot: {{ .Values.securityContext.runAsNonRoot }}
+            runAsUser: {{ .Values.securityContext.runAsUser }}
+            allowPrivilegeEscalation: {{ .Values.securityContext.allowPrivilegeEscalation }}
+            capabilities:
+              drop:
+                {{- toYaml .Values.securityContext.capabilities.drop | nindent 16 }}
+            seccompProfile:
+              type: {{ .Values.securityContext.seccompProfile.type }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+            - name: {{ .Values.service.metricsPortName | default "metrics" }}
+              containerPort: {{ .Values.service.metricsPort }}
+              protocol: TCP
+          env:
+            # Server Configuration
+            - name: SERVICE_NAME
+              value: {{ .Values.env.SERVICE_NAME | quote }}
+            - name: SERVER_PORT
+              value: {{ .Values.env.SERVER_PORT | quote }}
+            - name: METRICS_PORT
+              value: {{ .Values.env.METRICS_PORT | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.env.LOG_LEVEL | quote }}
+            # Harbor Configuration
+            - name: HARBOR_URL
+              value: {{ .Values.env.HARBOR_URL | quote }}
+            - name: HARBOR_ROBOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.harborCredentials.name }}
+                  key: {{ .Values.secrets.harborCredentials.robotUser }}
+            - name: HARBOR_ROBOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.harborCredentials.name }}
+                  key: {{ .Values.secrets.harborCredentials.robotPassword }}
+            - name: HARBOR_PROJECTS
+              value: {{ .Values.env.HARBOR_PROJECTS | quote }}
+            # Sigstore Configuration
+            - name: FULCIO_URL
+              value: {{ .Values.env.FULCIO_URL | quote }}
+            - name: REKOR_URL
+              value: {{ .Values.env.REKOR_URL | quote }}
+            - name: TOKEN_PATH
+              value: {{ .Values.env.TOKEN_PATH | quote }}
+            - name: TOKEN_AUDIENCE
+              value: {{ .Values.env.TOKEN_AUDIENCE | quote }}
+            # Webhook Configuration
+            - name: WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.harborWebhook.name }}
+                  key: {{ .Values.secrets.harborWebhook.key }}
+            # Worker Pool Configuration
+            - name: WORKER_COUNT
+              value: {{ .Values.env.WORKER_COUNT | quote }}
+            - name: QUEUE_SIZE
+              value: {{ .Values.env.QUEUE_SIZE | quote }}
+            # Reconciliation Configuration
+            - name: RECONCILE_INTERVAL
+              value: {{ .Values.env.RECONCILE_INTERVAL | quote }}
+            - name: RECONCILE_TIMEOUT
+              value: {{ .Values.env.RECONCILE_TIMEOUT | quote }}
+            # Retry Configuration
+            - name: MAX_RETRIES
+              value: {{ .Values.env.MAX_RETRIES | quote }}
+            - name: RETRY_BASE_DELAY
+              value: {{ .Values.env.RETRY_BASE_DELAY | quote }}
+            - name: RETRY_MAX_DELAY
+              value: {{ .Values.env.RETRY_MAX_DELAY | quote }}
+            # Severity Threshold
+            - name: SEVERITY_THRESHOLD
+              value: {{ .Values.env.SEVERITY_THRESHOLD | quote }}
+            # OpenTelemetry Configuration
+            - name: OTEL_EXPORTER_ENDPOINT
+              value: {{ .Values.env.OTEL_EXPORTER_ENDPOINT | quote }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.app.livenessProbePath }}
+              port: http
+            initialDelaySeconds: {{ .Values.app.initialDelaySeconds }}
+            periodSeconds: {{ .Values.app.periodSeconds }}
+            timeoutSeconds: {{ .Values.app.timeoutSeconds }}
+            successThreshold: {{ .Values.app.successThreshold }}
+            failureThreshold: {{ .Values.app.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.app.readinessProbePath }}
+              port: http
+            initialDelaySeconds: {{ .Values.app.initialDelaySeconds }}
+            periodSeconds: {{ .Values.app.periodSeconds }}
+            timeoutSeconds: {{ .Values.app.timeoutSeconds }}
+            successThreshold: {{ .Values.app.successThreshold }}
+            failureThreshold: {{ .Values.app.failureThreshold }}
+          volumeMounts:
+            {{- if .Values.tokenVolume.enabled }}
+            - name: fulcio-token
+              mountPath: {{ .Values.tokenVolume.mountPath }}
+              readOnly: true
+            {{- end }}
+      volumes:
+        {{- if .Values.tokenVolume.enabled }}
+        - name: fulcio-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: {{ .Values.tokenVolume.audience }}
+                  expirationSeconds: {{ .Values.tokenVolume.expirationSeconds }}
+                  path: fulcio-token
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

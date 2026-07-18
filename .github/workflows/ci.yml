@@ -1,0 +1,198 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'cmd/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'cmd/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - '.github/workflows/ci.yml'
+
+permissions:
+  id-token: write
+  contents: write
+  packages: write
+  security-events: write
+  actions: read
+
+env:
+  HARBOR_ADMIN_PASSWORD: ${{ secrets.HARBOR_ADMIN_PASSWORD }}
+  REGISTRY: registry.platform.cuscal.io
+  IMAGE_NAME: platform/signer-service
+
+jobs:
+  build:
+    runs-on: self-hosted-cuscal-io-base
+    outputs:
+      image-version: ${{ steps.image.outputs.image_version }}
+      image-digest: ${{ steps.image.outputs.digest }}
+      registry: ${{ env.REGISTRY }}
+      image-name: ${{ env.IMAGE_NAME }}
+    timeout-minutes: 15
+
+    steps:
+      - name: Set custom ref variables
+        id: ref
+        run: |
+          echo "main_trace_id=$(openssl rand -hex 16)" >> $GITHUB_ENV
+          echo "parent_span_id=$(openssl rand -hex 8)" >> $GITHUB_ENV
+          echo "main_trace_start_time=$(date +%s)" >> $GITHUB_ENV
+          VERSION=sha-${GITHUB_SHA::8}
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF/refs\/tags\//}
+          fi
+          echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_ENV
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "REVISION=${GITHUB_SHA}" >> $GITHUB_ENV
+          DATETIME=$(date +'%Y%m%d%H%M')
+          BUILD_TIME=$(date -u "+%F_%T")
+          echo "DATETIME=$DATETIME" >> $GITHUB_ENV
+          echo "BUILD_TIME=$BUILD_TIME" >> $GITHUB_ENV
+        shell: bash
+
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Login to container registry
+        run: echo "${HARBOR_ADMIN_PASSWORD}" | docker login "${REGISTRY}" -u admin --password-stdin
+
+      - name: Verify Go modules
+        run: go mod verify
+
+      - name: Build & Push
+        id: image
+        run: |
+          workspace="${GITHUB_WORKSPACE}"
+          if [[ "${workspace}" == /usr/share/actions-runner/_work/* ]]; then
+            workspace="/home/runner/_work${workspace#/usr/share/actions-runner/_work}"
+          fi
+
+          image="${REGISTRY}/${IMAGE_NAME}"
+          tag="${VERSION}"
+          platforms="${{ github.ref == 'refs/heads/main' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}"
+          builder="signer-service-builder"
+
+          if [[ "${platforms}" == *arm64* ]]; then
+            docker run --privileged --rm tonistiigi/binfmt --install all
+          fi
+
+          if ! docker buildx inspect "${builder}" >/dev/null 2>&1; then
+            docker buildx create \
+              --name "${builder}" \
+              --driver docker-container \
+              --driver-opt network=host \
+              --buildkitd-flags '--allow-insecure-entitlement security.insecure --allow-insecure-entitlement network.host'
+          fi
+          docker buildx use "${builder}"
+          docker buildx inspect --bootstrap
+
+          metadata_file="$(mktemp)"
+          docker buildx build \
+            --platform "${platforms}" \
+            --file "${workspace}/Dockerfile" \
+            --tag "${image}:${tag}" \
+            --build-arg "REVISION=${REVISION}" \
+            --build-arg "GIT_HASH=${VERSION}" \
+            --build-arg "RELEASE_VERSION=${DATETIME}" \
+            --build-arg "BUILD_TIME=${BUILD_TIME}" \
+            --sbom=true \
+            --push \
+            --metadata-file "${metadata_file}" \
+            "${workspace}"
+
+          digest=""
+          if command -v jq >/dev/null 2>&1; then
+            digest="$(jq -r '."containerimage.digest"' "${metadata_file}")"
+          fi
+          if [[ -z "${digest}" || "${digest}" == "null" ]]; then
+            digest="$(docker buildx imagetools inspect "${image}:${tag}" --format '{{.Manifest.Digest}}')"
+          fi
+          echo "image_version=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+
+  sign-image:
+    runs-on: self-hosted-cuscal-io-base
+    needs: [build]
+    env:
+      HARBOR_ADMIN_PASSWORD: ${{ secrets.HARBOR_ADMIN_PASSWORD }}
+    steps:
+      - name: Install cosign
+        run: |
+          if command -v cosign >/dev/null 2>&1; then
+            exit 0
+          fi
+          install_dir="/tmp/cosign-bin"
+          mkdir -p "${install_dir}"
+          curl -fsSL "https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64" -o "${install_dir}/cosign"
+          chmod +x "${install_dir}/cosign"
+          echo "${install_dir}" >> "${GITHUB_PATH}"
+
+      - name: Login to Container registry
+        run: echo "${HARBOR_ADMIN_PASSWORD}" | docker login "${{ needs.build.outputs.registry }}" -u admin --password-stdin
+
+      - name: Sign image with key
+        run: |
+          cosign sign --yes --key env://COSIGN_PRIVATE_KEY "${TAGS}"
+        env:
+          TAGS: ${{ needs.build.outputs.registry }}/${{ needs.build.outputs.image-name }}:${{ needs.build.outputs.image-version }}
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          DIGEST: ${{ needs.build.outputs.image-digest }}
+
+  update-image-tag:
+    needs: [build, sign-image]
+    if: github.event_name == 'pull_request'
+    runs-on: self-hosted-cuscal-io-base
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Update image tags in values files
+        run: |
+          TAG="${{ needs.build.outputs.image-version }}"
+          for f in argocharts/signer-service/values-version-*.yaml; do
+            [ -f "$f" ] || continue
+            sed -i -E "s/(tag: ).*/\1\"${TAG}\"/" "$f"
+            sed -i -E "s/(^version: ).*/\1${TAG}/" "$f"
+          done
+
+      - name: Commit and push changes
+        run: |
+          git add argocharts/signer-service/
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "chore: update image tag to ${{ needs.build.outputs.image-version }} [skip ci]"
+          git push

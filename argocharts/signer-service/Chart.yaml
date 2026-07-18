@@ -1,0 +1,21 @@
+apiVersion: v2
+name: signer-service
+description: Container image signing service for Cuscal Cloud Platform
+home: https://github.com/signer-service
+sources:
+  - https://github.com/signer-service
+keywords:
+  - signer-service
+  - container-signing
+  - sigstore
+  - cosign
+  - fulcio
+  - rekor
+  - harbor
+  - supply-chain-security
+type: application
+appVersion: "1.0.0"
+version: 0.1.0
+maintainers:
+  - name: Platform Team
+    email: platform@example.com

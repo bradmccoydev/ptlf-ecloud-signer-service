@@ -1,0 +1,323 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: signer-service
+  description: Stateless Go microservice that automatically signs container images after they pass vulnerability scanning in Harbor, using private Sigstore infrastructure (Fulcio + Rekor)
+  annotations:
+    github.com/project-slug: cuscal/ptlf-ecloud-signer-service
+    backstage.io/techdocs-ref: dir:.
+    backstage.io/source-location: url:https://github.com/cuscal/ptlf-ecloud-signer-service
+    github.com/team-slug: cuscal/platform-team
+    backstage.io/kubernetes-id: signer-service
+    backstage.io/kubernetes-label-selector: app.kubernetes.io/name=signer-service
+    argocd/app-instance-name: signer-service
+    argocd/app-name: signer-service
+    argocd/app-namespace: argocd
+    sonarqube.org/project-key: signer-service
+    cuscal.io/tier: "0"
+    cuscal.io/mao: "4h"
+  tags:
+    - go
+    - container-signing
+    - sigstore
+    - cosign
+    - fulcio
+    - rekor
+    - harbor
+    - supply-chain-security
+    - microservice
+    - tier0
+  links:
+    - url: https://github.com/cuscal/ptlf-ecloud-signer-service
+      title: GitHub Repository
+      icon: github
+    - url: https://fulcio.platform.cuscal.io
+      title: Fulcio CA
+      icon: docs
+    - url: https://rekor.platform.cuscal.io
+      title: Rekor Transparency Log
+      icon: docs
+    - url: https://registry.platform.cuscal.io
+      title: Harbor Registry
+      icon: docs
+spec:
+  type: service
+  lifecycle: production
+  owner: platform-team
+  system: Supply Chain Security
+  dependsOn:
+    - resource:harbor-registry
+    - resource:fulcio-ca
+    - resource:rekor-log
+  providesApis:
+    - signer-service-webhook-api
+  consumesApis: []
+  providesResources: []
+  consumesResources:
+    - resource:harbor-registry
+    - resource:fulcio-ca
+    - resource:rekor-log
+  properties:
+    architecture:
+      type: microservice
+      description: Stateless Go microservice that receives Harbor SCANNING_COMPLETED webhooks, evaluates scan reports against a severity threshold, and signs passing images using private Sigstore infrastructure (Fulcio + Rekor)
+      components:
+        - webhook-handler: Receives and authenticates Harbor scanning webhooks
+        - gate-evaluator: Evaluates scan reports against severity threshold
+        - signing-pipeline: Orchestrates Fulcio cert request, cosign signing, and Rekor upload
+        - reconciliation-sweep: Periodic sweep to sign missed images
+        - worker-pool: Bounded async job processing
+    language:
+      go: "1.25"
+    framework:
+      gin: "1.12.0"
+    observability:
+      opentelemetry: "1.44.0"
+      prometheus: "enabled"
+    deployment:
+      - kubernetes
+      - docker
+      - helm
+      - argocd
+    infrastructure:
+      - sigstore-fulcio
+      - sigstore-rekor
+      - harbor-registry
+      - eks
+    monitoring:
+      - prometheus
+      - grafana
+      - opentelemetry
+      - structured-logging
+    security:
+      - keyless-signing
+      - projected-sa-tokens
+      - read-only-rootfs
+      - non-root-user
+      - network-policies
+      - external-secrets
+    features:
+      - webhook-triggered-signing
+      - severity-gate-evaluation
+      - idempotent-processing
+      - reconciliation-sweep
+      - exponential-backoff-retry
+      - fulcio-certificate-auth
+      - rekor-transparency-log
+      - cosign-image-signatures
+      - prometheus-metrics
+      - distributed-tracing
+      - health-checks
+      - graceful-shutdown
+    testing:
+      - property-based-testing
+      - unit-testing
+      - gopter-framework
+---
+apiVersion: backstage.io/v1alpha1
+kind: API
+metadata:
+  name: signer-service-webhook-api
+  description: Signer Service webhook API that receives Harbor SCANNING_COMPLETED events and triggers the container image signing pipeline
+  annotations:
+    github.com/project-slug: cuscal/ptlf-ecloud-signer-service
+    backstage.io/techdocs-ref: dir:.
+    backstage.io/source-location: url:https://github.com/cuscal/ptlf-ecloud-signer-service
+  tags:
+    - rest
+    - http
+    - json
+    - webhooks
+    - harbor
+    - container-signing
+spec:
+  type: openapi
+  lifecycle: production
+  owner: platform-team
+  system: Supply Chain Security
+  definition: |
+    openapi: "3.0.0"
+    info:
+      version: 1.0.0
+      title: Signer Service Webhook API
+      description: |
+        The Signer Service exposes a webhook endpoint that receives Harbor SCANNING_COMPLETED
+        events. When a scan passes the severity gate (no High or Critical vulnerabilities),
+        the service signs the image using private Sigstore infrastructure.
+
+        **Webhook Flow:**
+        1. Harbor fires SCANNING_COMPLETED webhook to /webhook
+        2. Service validates shared secret (X-Harbor-Secret header)
+        3. Service extracts artifact metadata (project, repo, digest)
+        4. Service enqueues signing job asynchronously
+        5. Worker evaluates scan report, signs if passing
+
+        **Health Endpoints:**
+        - GET /health — liveness check (always 200 if process running)
+        - GET /ready — readiness check (200 only when Harbor, Fulcio, Rekor reachable)
+      license:
+        name: Apache 2.0
+        url: http://www.apache.org/licenses/LICENSE-2.0.html
+      contact:
+        name: Platform Team
+        email: platform@cuscal.com.au
+    servers:
+      - url: http://signer-service.platform-signing.svc.cluster.local:8080
+        description: In-cluster service
+    paths:
+      /webhook:
+        post:
+          summary: Receive Harbor scanning webhook
+          description: Receives SCANNING_COMPLETED webhooks from Harbor and triggers the signing pipeline
+          tags:
+            - Webhook
+          parameters:
+            - name: X-Harbor-Secret
+              in: header
+              required: true
+              schema:
+                type: string
+              description: Shared secret for webhook authentication
+          requestBody:
+            required: true
+            content:
+              application/json:
+                schema:
+                  $ref: '#/components/schemas/WebhookPayload'
+          responses:
+            '200':
+              description: Webhook accepted or event discarded
+              content:
+                application/json:
+                  schema:
+                    $ref: '#/components/schemas/WebhookResponse'
+            '401':
+              description: Invalid or missing webhook secret
+            '400':
+              description: Payload too large or malformed JSON
+            '422':
+              description: Missing required fields in payload
+      /health:
+        get:
+          summary: Liveness check
+          tags:
+            - Health
+          responses:
+            '200':
+              description: Service is alive
+              content:
+                application/json:
+                  schema:
+                    $ref: '#/components/schemas/HealthResponse'
+      /ready:
+        get:
+          summary: Readiness check
+          tags:
+            - Health
+          responses:
+            '200':
+              description: Service is ready (all dependencies reachable)
+              content:
+                application/json:
+                  schema:
+                    $ref: '#/components/schemas/ReadyResponse'
+            '503':
+              description: Service is not ready (dependency unreachable or shutting down)
+    components:
+      schemas:
+        WebhookPayload:
+          type: object
+          properties:
+            type:
+              type: string
+              example: "SCANNING_COMPLETED"
+            occur_at:
+              type: integer
+              format: int64
+            operator:
+              type: string
+            event_data:
+              type: object
+              properties:
+                resources:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      digest:
+                        type: string
+                        example: "sha256:abc123..."
+                      tag:
+                        type: string
+                repository:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                      example: "library/nginx"
+                    namespace:
+                      type: string
+                      example: "library"
+        WebhookResponse:
+          type: object
+          properties:
+            status:
+              type: string
+              example: "accepted"
+        HealthResponse:
+          type: object
+          properties:
+            status:
+              type: string
+              example: "ok"
+        ReadyResponse:
+          type: object
+          properties:
+            status:
+              type: string
+              example: "ready"
+---
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: harbor-registry
+  description: Harbor container registry at registry.platform.cuscal.io hosting all platform images
+  tags:
+    - harbor
+    - registry
+    - containers
+spec:
+  type: registry
+  owner: platform-team
+  system: Supply Chain Security
+  lifecycle: production
+---
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: fulcio-ca
+  description: Private Fulcio certificate authority at fulcio.platform.cuscal.io issuing short-lived signing certificates
+  tags:
+    - fulcio
+    - sigstore
+    - certificate-authority
+spec:
+  type: certificate-authority
+  owner: platform-team
+  system: Supply Chain Security
+  lifecycle: production
+---
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: rekor-log
+  description: Private Rekor transparency log at rekor.platform.cuscal.io recording all signing events
+  tags:
+    - rekor
+    - sigstore
+    - transparency-log
+spec:
+  type: transparency-log
+  owner: platform-team
+  system: Supply Chain Security
+  lifecycle: production

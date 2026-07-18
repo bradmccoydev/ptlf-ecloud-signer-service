@@ -1,0 +1,70 @@
+name: TechDocs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yml'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'TechDocs mode: validate (check config and links) or publish (build and deploy)'
+        required: true
+        default: 'validate'
+        type: string
+        enum: [validate, publish]
+
+jobs:
+  validate:
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.mode == 'validate'
+    runs-on: self-hosted-cuscal-io-terraform
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Validate TechDocs
+        uses: cuscal/app-eengineering-shared-githubactions/actions/tech-docs@main
+        with:
+          mode: validate
+          python_version: '3.11'
+          entity_name: signer-service
+          entity_kind: Component
+          entity_namespace: default
+          validate_links: true
+          validate_structure: true
+
+  publish-prod:
+    needs: [validate]
+    if: always() && (needs.validate.result == 'success' || needs.validate.result == 'skipped') && (github.event_name != 'workflow_dispatch' || github.event.inputs.mode == 'publish')
+    runs-on: self-hosted-cuscal-io-terraform
+    strategy:
+      matrix:
+        include:
+          - bucket: cuscal-platform-techdocs
+            label: cuscal-io
+    name: publish-prod-${{ matrix.label }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Build and Publish TechDocs
+        uses: cuscal/app-eengineering-shared-githubactions/actions/tech-docs@main
+        with:
+          mode: all
+          python_version: '3.11'
+          environment: prod
+          entity_name: signer-service
+          entity_kind: Component
+          entity_namespace: default
+          s3_bucket: cuscal-platform-techdocs
+          site_url: https://backstage.platform.cuscal.io
+          edit_uri: edit/main/docs/
+          backstage_docs_url: https://backstage.platform.cuscal.io

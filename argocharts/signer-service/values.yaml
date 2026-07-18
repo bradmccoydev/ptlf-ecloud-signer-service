@@ -1,0 +1,165 @@
+nameOverride: 'signer-service'
+fullnameOverride: 'signer-service'
+
+# Default replica count
+replicaCount: 2
+
+# Namespace for deployment
+namespace: platform-signing
+
+# Version (should be overridden by CI/CD)
+version: "1.0.0"
+
+# Image configuration
+image:
+  repository: registry.platform.cuscal.io/platform/signer-service
+  tag: latest
+  pullPolicy: IfNotPresent
+  pullSecrets: harbor-cred
+
+# Security context for the container
+securityContext:
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
+
+# Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+# Resource limits and requests
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 8080
+  metricsPort: 9090
+  metricsPortName: metrics
+  annotations: {}
+
+# Service Account configuration
+serviceAccount:
+  create: true
+  name: signer
+  annotations: {}
+
+# Pod Disruption Budget
+pdb:
+  enabled: true
+  minAvailable: 1
+
+# ServiceMonitor for Prometheus scraping
+serviceMonitor:
+  enabled: true
+  port: 9090
+  interval: 30s
+  path: /metrics
+  labels: {}
+
+# Health and readiness probes
+app:
+  livenessProbePath: /health
+  readinessProbePath: /ready
+  initialDelaySeconds: 10
+  periodSeconds: 30
+  successThreshold: 1
+  failureThreshold: 3
+  timeoutSeconds: 5
+
+# Projected SA token volume for Fulcio authentication
+tokenVolume:
+  enabled: true
+  mountPath: /var/run/secrets/tokens/fulcio-token
+  audience: sigstore
+  expirationSeconds: 3600
+
+# Termination grace period
+terminationGracePeriodSeconds: 30
+
+# Environment variables for all configuration
+env:
+  # Server Configuration
+  SERVICE_NAME: "signer-service"
+  SERVER_PORT: "8080"
+  METRICS_PORT: "9090"
+  LOG_LEVEL: "info"
+
+  # Harbor Configuration
+  HARBOR_URL: "https://registry.platform.cuscal.io"
+  HARBOR_ROBOT_USER: ""
+  HARBOR_ROBOT_PASSWORD: ""
+  HARBOR_PROJECTS: "chainguard,charts,platform,applications,library"
+
+  # Sigstore Configuration
+  FULCIO_URL: "https://fulcio.platform.cuscal.io"
+  REKOR_URL: "https://rekor.platform.cuscal.io"
+  TOKEN_PATH: "/var/run/secrets/tokens/fulcio-token"
+  TOKEN_AUDIENCE: "sigstore"
+
+  # Webhook Configuration
+  WEBHOOK_SECRET: ""
+
+  # Worker Pool Configuration
+  WORKER_COUNT: "5"
+  QUEUE_SIZE: "100"
+
+  # Reconciliation Configuration
+  RECONCILE_INTERVAL: "15m"
+  RECONCILE_TIMEOUT: "10m"
+
+  # Retry Configuration
+  MAX_RETRIES: "3"
+  RETRY_BASE_DELAY: "1s"
+  RETRY_MAX_DELAY: "10s"
+
+  # Severity Threshold
+  SEVERITY_THRESHOLD: "High"
+
+  # OpenTelemetry Configuration
+  OTEL_EXPORTER_ENDPOINT: "http://opentelemetry-collector.observability.svc.cluster.local:4318"
+
+# Secrets managed via ExternalSecrets
+secrets:
+  harborWebhook:
+    name: harbor-signer-webhook
+    key: webhook-secret
+  harborCredentials:
+    name: harbor-signer-credentials
+    robotUser: robot-user
+    robotPassword: robot-password
+
+# Network Policy
+networkPolicy:
+  enabled: true
+
+# Node scheduling
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Observability
+observability:
+  prometheus:
+    enabled: true
+    release: kube-prometheus-stack
+  otel:
+    enabled: true
+    endpoint: "http://opentelemetry-collector.observability.svc.cluster.local:4318"
+    serviceName: signer-service
+    serviceVersion: "1.0.0"
+    environment: dev
