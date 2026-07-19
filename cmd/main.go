@@ -82,8 +82,11 @@ func run() error {
 	}
 	evaluator := gate.NewEvaluator(threshold)
 
-	// 7. Create Sigstore signer.
+	// 7. Create Sigstore signer with concrete Fulcio, Rekor, and Cosign clients.
 	signer := sigstore.NewDefaultSigner(
+		sigstore.WithFulcioClient(sigstore.NewHTTPFulcioClient(nil)),
+		sigstore.WithRekorClient(sigstore.NewHTTPRekorClient(nil)),
+		sigstore.WithCosignSigner(sigstore.NewDefaultCosignSigner()),
 		sigstore.WithTokenProvider(&sigstore.FileTokenProvider{}),
 		sigstore.WithMetricsRecorder(m),
 		sigstore.WithRetryConfig(sigstore.RetryConfig{
@@ -101,10 +104,12 @@ func run() error {
 		log,
 		m,
 		signing.SigningConfig{
-			HarborURL: cfg.HarborURL,
-			FulcioURL: cfg.FulcioURL,
-			RekorURL:  cfg.RekorURL,
-			TokenPath: cfg.TokenPath,
+			HarborURL:         cfg.HarborURL,
+			FulcioURL:         cfg.FulcioURL,
+			RekorURL:          cfg.RekorURL,
+			TokenPath:         cfg.TokenPath,
+			RegistryURL:       cfg.RegistryURL,
+			SeverityThreshold: cfg.SeverityThreshold,
 		},
 	)
 

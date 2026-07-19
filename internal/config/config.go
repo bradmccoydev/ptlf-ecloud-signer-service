@@ -23,6 +23,9 @@ type Config struct {
 	HarborRobot    string
 	HarborPassword string
 
+	// Registry
+	RegistryURL string
+
 	// Sigstore
 	FulcioURL     string
 	RekorURL      string
@@ -68,6 +71,9 @@ func Load() (*Config, error) {
 		HarborURL:      getEnv("HARBOR_URL", ""),
 		HarborRobot:    getEnv("HARBOR_ROBOT_USER", ""),
 		HarborPassword: getEnv("HARBOR_ROBOT_PASSWORD", ""),
+
+		// Registry
+		RegistryURL: getEnv("REGISTRY_URL", "registry.platform.cuscal.io"),
 
 		// Sigstore
 		FulcioURL:     getEnv("FULCIO_URL", ""),

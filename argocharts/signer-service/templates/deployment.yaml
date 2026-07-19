@@ -72,6 +72,9 @@ spec:
                   key: {{ .Values.secrets.harborCredentials.robotPassword }}
             - name: HARBOR_PROJECTS
               value: {{ .Values.env.HARBOR_PROJECTS | quote }}
+            # Registry Configuration
+            - name: REGISTRY_URL
+              value: {{ .Values.env.REGISTRY_URL | quote }}
             # Sigstore Configuration
             - name: FULCIO_URL
               value: {{ .Values.env.FULCIO_URL | quote }}

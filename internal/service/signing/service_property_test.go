@@ -54,15 +54,23 @@ type mockMetricsRecorder struct {
 	gateFailures     atomic.Int32
 }
 
-func (m *mockMetricsRecorder) IncrementSignaturesIssued(_ string) {
+func (m *mockMetricsRecorder) IncrementSignaturesIssued(_, _ string) {
 	m.signaturesIssued.Add(1)
 }
 
-func (m *mockMetricsRecorder) IncrementGateFailures(_ string) {
+func (m *mockMetricsRecorder) IncrementGateFailures(_, _ string) {
 	m.gateFailures.Add(1)
 }
 
 func (m *mockMetricsRecorder) ObserveWebhookLatency(_ time.Duration) {}
+
+func (m *mockMetricsRecorder) ObserveSigningDuration(_ string, _ time.Duration) {}
+
+func (m *mockMetricsRecorder) IncrementArtifactsSkipped(_ string) {}
+
+func (m *mockMetricsRecorder) IncrementInFlightSigningOps() {}
+
+func (m *mockMetricsRecorder) DecrementInFlightSigningOps() {}
 
 // mockEvaluatorPass always passes (should never be reached in this test).
 type mockEvaluatorPass struct{}

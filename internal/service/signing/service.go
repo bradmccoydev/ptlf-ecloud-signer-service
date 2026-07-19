@@ -21,9 +21,13 @@ import (
 
 // SigningMetrics abstracts metric operations for the signing service.
 type SigningMetrics interface {
-	IncrementSignaturesIssued(source string)
-	IncrementGateFailures(reason string)
+	IncrementSignaturesIssued(source, image string)
+	IncrementGateFailures(reason, image string)
 	ObserveWebhookLatency(duration time.Duration)
+	ObserveSigningDuration(image string, duration time.Duration)
+	IncrementArtifactsSkipped(image string)
+	IncrementInFlightSigningOps()
+	DecrementInFlightSigningOps()
 }
 
 // SigningConfig holds configuration for the signing service.
@@ -38,6 +42,8 @@ type SigningConfig struct {
 	TokenPath string
 	// RegistryURL is the registry hostname for image references (e.g., "registry.platform.cuscal.io").
 	RegistryURL string
+	// SeverityThreshold is the configured gate policy (e.g., "High").
+	SeverityThreshold string
 }
 
 // SigningService orchestrates the full signing pipeline for an artifact.
@@ -92,6 +98,13 @@ func (s *SigningService) ProcessArtifact(ctx context.Context, ref gate.ArtifactR
 	)
 	defer span.End()
 
+	// Derive a human-readable image name for metric labels (project/repo).
+	imageName := ref.Project + "/" + ref.Repo
+
+	// Track in-flight operations.
+	s.metrics.IncrementInFlightSigningOps()
+	defer s.metrics.DecrementInFlightSigningOps()
+
 	// Step 1: Idempotency check — skip if already signed.
 	alreadySigned, err := s.checkExistingSignature(ctx, ref)
 	if err != nil {
@@ -110,6 +123,7 @@ func (s *SigningService) ProcessArtifact(ctx context.Context, ref gate.ArtifactR
 			zap.String("digest", ref.Digest),
 			zap.String("source", source),
 		)
+		s.metrics.IncrementArtifactsSkipped(imageName)
 		span.SetAttributes(attribute.Bool("skipped.already_signed", true))
 		return nil
 	}
@@ -117,7 +131,7 @@ func (s *SigningService) ProcessArtifact(ctx context.Context, ref gate.ArtifactR
 	// Step 2: Fetch scan report from Harbor.
 	report, err := s.fetchScanReport(ctx, ref)
 	if err != nil {
-		s.metrics.IncrementGateFailures("scan_fetch_error")
+		s.metrics.IncrementGateFailures("scan_fetch_error", imageName)
 		s.logger.Error("failed to fetch scan report",
 			zap.String("project", ref.Project),
 			zap.String("repo", ref.Repo),
@@ -136,7 +150,7 @@ func (s *SigningService) ProcessArtifact(ctx context.Context, ref gate.ArtifactR
 
 	// Step 4: Handle gate failure.
 	if !decision.Pass {
-		s.metrics.IncrementGateFailures(decision.Reason)
+		s.metrics.IncrementGateFailures(decision.Reason, imageName)
 		s.logGateFailure(ref, decision, source)
 		span.SetAttributes(
 			attribute.Bool("gate.pass", false),
@@ -149,9 +163,16 @@ func (s *SigningService) ProcessArtifact(ctx context.Context, ref gate.ArtifactR
 	// Step 5: Gate passed — sign the artifact.
 	imageRef := fmt.Sprintf("%s/%s/%s@%s", s.config.RegistryURL, ref.Project, ref.Repo, ref.Digest)
 
-	result, err := s.signArtifact(ctx, imageRef)
+	// Compute a scan report identifier from the artifact digest for traceability.
+	scanReportDigest := ref.Digest
+
+	signingStart := time.Now()
+	result, err := s.signArtifact(ctx, imageRef, scanReportDigest)
+	signingDuration := time.Since(signingStart)
+
 	if err != nil {
-		s.metrics.IncrementGateFailures("signing_error")
+		s.metrics.IncrementGateFailures("signing_error", imageName)
+		s.metrics.ObserveSigningDuration(imageName, signingDuration)
 		s.logger.Error("signing operation failed",
 			zap.String("project", ref.Project),
 			zap.String("repo", ref.Repo),
@@ -165,8 +186,9 @@ func (s *SigningService) ProcessArtifact(ctx context.Context, ref gate.ArtifactR
 		return fmt.Errorf("signing failed for %s: %w", imageRef, err)
 	}
 
-	// Success: increment metric and log.
-	s.metrics.IncrementSignaturesIssued(source)
+	// Success: record metrics and log.
+	s.metrics.ObserveSigningDuration(imageName, signingDuration)
+	s.metrics.IncrementSignaturesIssued(source, imageName)
 	s.logger.Info("artifact signed successfully",
 		zap.String("project", ref.Project),
 		zap.String("repo", ref.Repo),
@@ -175,6 +197,7 @@ func (s *SigningService) ProcessArtifact(ctx context.Context, ref gate.ArtifactR
 		zap.String("rekor_entry_uuid", result.RekorEntryUUID),
 		zap.Time("signed_at", result.SignedAt),
 		zap.String("image_ref", imageRef),
+		zap.Duration("signing_duration", signingDuration),
 	)
 	span.SetAttributes(
 		attribute.Bool("gate.pass", true),
@@ -243,7 +266,7 @@ func (s *SigningService) evaluateReport(ctx context.Context, report *harbor.Scan
 }
 
 // signArtifact performs the actual signing operation via the Sigstore signer.
-func (s *SigningService) signArtifact(ctx context.Context, imageRef string) (*sigstore.SigningResult, error) {
+func (s *SigningService) signArtifact(ctx context.Context, imageRef string, scanReportDigest string) (*sigstore.SigningResult, error) {
 	ctx, span := s.tracer.Start(ctx, "SignArtifact",
 		trace.WithAttributes(
 			attribute.String("image_ref", imageRef),
@@ -257,9 +280,9 @@ func (s *SigningService) signArtifact(ctx context.Context, imageRef string) (*si
 		FulcioURL: s.config.FulcioURL,
 		RekorURL:  s.config.RekorURL,
 		Annotations: map[string]string{
-			"scan-report": "sha256:pending",
+			"scan-report": scanReportDigest,
 			"trivy-db":    "latest",
-			"policy":      "high",
+			"policy":      s.config.SeverityThreshold,
 			"timestamp":   time.Now().UTC().Format(time.RFC3339),
 		},
 	}

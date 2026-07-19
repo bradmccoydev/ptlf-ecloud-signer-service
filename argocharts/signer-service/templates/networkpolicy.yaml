@@ -55,7 +55,7 @@ spec:
     - to:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: sigstore
+              kubernetes.io/metadata.name: fulcio
       ports:
         - protocol: TCP
           port: 443
@@ -65,7 +65,7 @@ spec:
     - to:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: sigstore
+              kubernetes.io/metadata.name: rekor
       ports:
         - protocol: TCP
           port: 443

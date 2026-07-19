@@ -1,0 +1,115 @@
+{{- if .Values.harborWebhook.enabled -}}
+# Post-install/upgrade Job that registers a SCANNING_COMPLETED webhook in each
+# configured Harbor project, pointing at the signer-service's /webhook endpoint.
+# Uses the Harbor API — no Terraform needed.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "chart.fullname" . }}-webhook-register
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "chart.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        {{- include "chart.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: webhook-register
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ include "chart.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: register-webhook
+          image: {{ .Values.harborWebhook.image | default "curlimages/curl:8.7.1" }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: HARBOR_URL
+              value: {{ .Values.env.HARBOR_URL | quote }}
+            - name: HARBOR_ROBOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.harborCredentials.name }}
+                  key: {{ .Values.secrets.harborCredentials.robotUser }}
+            - name: HARBOR_ROBOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.harborCredentials.name }}
+                  key: {{ .Values.secrets.harborCredentials.robotPassword }}
+            - name: WEBHOOK_ENDPOINT
+              value: {{ .Values.harborWebhook.endpoint | quote }}
+            - name: WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.harborWebhook.name }}
+                  key: {{ .Values.secrets.harborWebhook.key }}
+            - name: HARBOR_PROJECTS
+              value: {{ .Values.env.HARBOR_PROJECTS | quote }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              # Register SCANNING_COMPLETED webhook in each configured Harbor project.
+              IFS=',' read -r projects <<EOF
+              ${HARBOR_PROJECTS}
+              EOF
+
+              for project in $(echo "${HARBOR_PROJECTS}" | tr ',' ' '); do
+                echo "Registering webhook for project: ${project}"
+
+                # Check if webhook already exists
+                existing=$(curl -s -u "${HARBOR_ROBOT_USER}:${HARBOR_ROBOT_PASSWORD}" \
+                  "${HARBOR_URL}/api/v2.0/projects/${project}/webhook/policies" \
+                  -H "Accept: application/json")
+
+                # Check if our webhook name already exists
+                if echo "${existing}" | grep -q '"name":"signer-service"'; then
+                  echo "  Webhook already exists for ${project}, skipping"
+                  continue
+                fi
+
+                # Create the webhook policy
+                response=$(curl -s -w "\n%{http_code}" -u "${HARBOR_ROBOT_USER}:${HARBOR_ROBOT_PASSWORD}" \
+                  -X POST "${HARBOR_URL}/api/v2.0/projects/${project}/webhook/policies" \
+                  -H "Content-Type: application/json" \
+                  -d "{
+                    \"name\": \"signer-service\",
+                    \"description\": \"Auto-sign images after successful vulnerability scan\",
+                    \"enabled\": true,
+                    \"event_types\": [\"SCANNING_COMPLETED\"],
+                    \"targets\": [{
+                      \"type\": \"http\",
+                      \"address\": \"${WEBHOOK_ENDPOINT}\",
+                      \"skip_cert_verify\": false,
+                      \"auth_header\": \"${WEBHOOK_SECRET}\"
+                    }]
+                  }")
+
+                http_code=$(echo "${response}" | tail -1)
+                body=$(echo "${response}" | sed '$d')
+
+                if [ "${http_code}" = "201" ] || [ "${http_code}" = "200" ]; then
+                  echo "  Webhook registered successfully for ${project}"
+                elif [ "${http_code}" = "409" ]; then
+                  echo "  Webhook already exists for ${project} (409 conflict)"
+                else
+                  echo "  ERROR: Failed to register webhook for ${project} (HTTP ${http_code}): ${body}"
+                  exit 1
+                fi
+              done
+
+              echo "Webhook registration complete"
+{{- end }}

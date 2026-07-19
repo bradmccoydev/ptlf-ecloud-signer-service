@@ -105,6 +105,9 @@ env:
   HARBOR_ROBOT_PASSWORD: ""
   HARBOR_PROJECTS: "chainguard,charts,platform,applications,library"
 
+  # Registry Configuration
+  REGISTRY_URL: "registry.platform.cuscal.io"
+
   # Sigstore Configuration
   FULCIO_URL: "https://fulcio.platform.cuscal.io"
   REKOR_URL: "https://rekor.platform.cuscal.io"
@@ -151,6 +154,15 @@ networkPolicy:
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# Harbor Webhook Registration (post-install Job)
+harborWebhook:
+  enabled: true
+  # The endpoint Harbor will POST scan events to.
+  # Must be reachable from Harbor core pods (internal ClusterIP service).
+  endpoint: "http://signer-service.platform-signing.svc.cluster.local:8080/webhook"
+  # Image used for the registration Job (lightweight curl image).
+  image: "curlimages/curl:8.7.1"
 
 # Observability
 observability:
